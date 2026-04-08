@@ -8,7 +8,7 @@ defmodule CloakedReq.MixProject do
     [
       app: :cloaked_req,
       version: @version,
-      elixir: "~> 1.19",
+      elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
       description: description(),
