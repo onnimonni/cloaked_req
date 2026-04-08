@@ -13,7 +13,14 @@ defmodule CloakedReq do
   alias CloakedReq.Request
   alias CloakedReq.Response
 
-  @custom_req_options [:cookie_jar, :impersonate, :insecure_skip_verify, :local_address, :max_body_size]
+  @custom_req_options [
+    :cookie_jar,
+    :impersonate,
+    :insecure_skip_verify,
+    :local_address,
+    :max_body_size,
+    :proxy
+  ]
 
   @doc """
   Attaches `CloakedReq` adapter behavior to an existing `Req.Request`.
@@ -25,6 +32,8 @@ defmodule CloakedReq do
   - `:insecure_skip_verify` - boolean
   - `:local_address` - outbound source IP as string, IPv4 tuple, or IPv6 tuple
   - `:max_body_size` - positive integer or `:unlimited` (default: 10 MB)
+  - `:proxy` - upstream HTTP(S)/SOCKS proxy URL string (e.g. `"http://127.0.0.1:8888"`),
+    forwarded to `wreq::Proxy::all/1`. `nil` disables proxying.
 
   ## Examples
 

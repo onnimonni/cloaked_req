@@ -31,8 +31,8 @@ static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
         .expect("tokio runtime must initialize")
 });
 
-/// Cache key: (emulation profile, insecure_skip_verify, local_address).
-type ClientKey = (Option<String>, bool, Option<String>);
+/// Cache key: (emulation profile, insecure_skip_verify, local_address, proxy).
+type ClientKey = (Option<String>, bool, Option<String>, Option<String>);
 
 /// Persistent client pool. Clients are reused across NIF calls for connection
 /// pooling, TLS session resumption, and HTTP keep-alive.
@@ -53,11 +53,13 @@ fn get_or_build_client(
     emulation: Option<&str>,
     insecure_skip_verify: bool,
     local_address: Option<&str>,
+    proxy: Option<&str>,
 ) -> Result<Client, NativeError> {
     let key = (
         emulation.map(|s| s.to_string()),
         insecure_skip_verify,
         local_address.map(|s| s.to_string()),
+        proxy.map(|s| s.to_string()),
     );
 
     // Fast path: read lock
@@ -104,6 +106,17 @@ fn get_or_build_client(
 
     if insecure_skip_verify {
         builder = builder.cert_verification(false);
+    }
+
+    if let Some(proxy_url) = proxy {
+        let proxy = wreq::Proxy::all(proxy_url).map_err(|reason| {
+            NativeError::new(
+                "invalid_request",
+                "invalid proxy url",
+                json!({"value": proxy_url, "reason": reason.to_string()}),
+            )
+        })?;
+        builder = builder.proxy(proxy);
     }
 
     let client = builder.build().map_err(|reason| {
@@ -218,6 +231,7 @@ fn execute_request(
         request.emulation.as_deref(),
         request.insecure_skip_verify,
         request.local_address.as_deref(),
+        request.proxy.as_deref(),
     )?;
 
     RUNTIME.block_on(async move {
@@ -426,6 +440,7 @@ mod tests {
             insecure_skip_verify: false,
             max_body_size_bytes: None,
             local_address: None,
+            proxy: None,
         }
     }
 
@@ -568,6 +583,7 @@ mod tests {
             insecure_skip_verify: false,
             max_body_size_bytes: None,
             local_address: None,
+            proxy: None,
         };
 
         let (meta, body) =
@@ -752,6 +768,88 @@ mod tests {
         let err = result.err().expect("expected error");
         assert_eq!(err.type_name, "invalid_request");
         assert_eq!(err.message, "invalid local_address");
+    }
+
+    // --- proxy tests ---
+
+    #[test]
+    fn rejects_invalid_proxy_url() {
+        let mut request = base_request();
+        request.url = "https://example.com".to_string();
+        request.proxy = Some("not a url".to_string());
+
+        let result = execute_request(request, None, None);
+        assert!(result.is_err());
+        let err = result.err().expect("expected error");
+        assert_eq!(err.type_name, "invalid_request");
+        assert_eq!(err.message, "invalid proxy url");
+    }
+
+    #[test]
+    fn routes_http_request_through_loopback_proxy() {
+        // The test spawns a tiny HTTP forward proxy on 127.0.0.1:N that
+        // accepts ONE GET absolute-form request (`GET http://origin/path HTTP/1.1`)
+        // and returns a canned 200. If our patched get_or_build_client
+        // doesn't actually wire the proxy through to wreq::Proxy::all, the
+        // request would go direct to the origin (dns lookup of "origin"
+        // would fail) so the 200 body is proof the option is live.
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").expect("proxy must bind");
+        let proxy_addr = proxy_listener.local_addr().expect("proxy addr");
+
+        let (tx, rx) = mpsc::channel::<String>();
+
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = proxy_listener.accept().expect("proxy accept");
+            stream
+                .set_read_timeout(Some(StdDuration::from_millis(2000)))
+                .expect("read timeout");
+
+            let mut buf = [0u8; 4096];
+            let mut request_text = String::new();
+            loop {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                request_text.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if request_text.contains("\r\n\r\n") {
+                    break;
+                }
+            }
+            let _ = tx.send(request_text);
+
+            let body = "proxied";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        });
+
+        let mut request = base_request();
+        request.url = "http://origin.test.invalid/hello".to_string();
+        request.proxy = Some(format!("http://{}", proxy_addr));
+
+        let (meta, body) = execute_request(request, None, None).expect("request should succeed");
+        handle.join().expect("proxy thread join");
+
+        let first_line = rx
+            .recv_timeout(StdDuration::from_secs(2))
+            .expect("proxy must receive request")
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
+
+        assert_eq!(meta.status, 200);
+        assert_eq!(body, b"proxied");
+        // Absolute-form request line is how HTTP proxies get GETs
+        assert!(
+            first_line.contains("http://origin.test.invalid/hello"),
+            "expected absolute-form request through proxy, got {first_line}"
+        );
     }
 
     #[test]

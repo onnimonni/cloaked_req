@@ -31,7 +31,8 @@ defmodule CloakedReq.Request do
          {:ok, insecure_skip_verify} <-
            normalize_insecure_skip_verify(Req.Request.get_option(request, :insecure_skip_verify, false)),
          {:ok, local_address} <-
-           normalize_local_address(Req.Request.get_option(request, :local_address)) do
+           normalize_local_address(Req.Request.get_option(request, :local_address)),
+         {:ok, proxy} <- normalize_proxy(Req.Request.get_option(request, :proxy)) do
       {:ok,
        {%{
           method: request.method |> Atom.to_string() |> String.upcase(),
@@ -41,9 +42,37 @@ defmodule CloakedReq.Request do
           emulation: emulation,
           insecure_skip_verify: insecure_skip_verify,
           max_body_size_bytes: max_body_size,
-          local_address: local_address
+          local_address: local_address,
+          proxy: proxy
         }, body}}
     end
+  end
+
+  @spec normalize_proxy(term()) :: {:ok, nil | String.t()} | {:error, Error.t()}
+  defp normalize_proxy(nil), do: {:ok, nil}
+
+  defp normalize_proxy(%URI{scheme: scheme} = uri) when scheme in ["http", "https", "socks5", "socks5h", "socks4"] do
+    {:ok, URI.to_string(uri)}
+  end
+
+  defp normalize_proxy(value) when is_binary(value) do
+    case URI.parse(value) do
+      %URI{scheme: scheme, host: host}
+      when scheme in ["http", "https", "socks5", "socks5h", "socks4"] and is_binary(host) ->
+        {:ok, value}
+
+      _ ->
+        {:error,
+         Error.new(
+           :invalid_request,
+           "proxy must be an absolute http(s) or socks URL",
+           %{value: value}
+         )}
+    end
+  end
+
+  defp normalize_proxy(_value) do
+    {:error, Error.new(:invalid_request, "proxy must be a URL string or nil")}
   end
 
   @spec validate_into(Req.Request.t()) :: :ok | {:error, Error.t()}

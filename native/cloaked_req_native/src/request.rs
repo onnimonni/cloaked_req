@@ -21,6 +21,8 @@ pub struct NativeRequest {
     pub max_body_size_bytes: Option<u64>,
     #[serde(default)]
     pub local_address: Option<String>,
+    #[serde(default)]
+    pub proxy: Option<String>,
 }
 
 #[cfg(test)]
